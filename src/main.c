@@ -27,87 +27,72 @@
     fflush(stdout);
 char hostname[MAX_HOSTNAME_SIZE];
 
-
-#define PRINT_PROMPT() do {                                            \
-    int get_hostname_stat = gethostname(hostname, MAX_HOSTNAME_SIZE); \
-    char *cwd = get_current_dir_name();                             \
-    if (get_hostname_stat == -1) {                                    \
-        PRINT("[%s]$ ", cwd);                                         \
+#define PRINT_PROMPT() do {                                             \
+    int get_hostname_stat = gethostname(hostname, MAX_HOSTNAME_SIZE);   \
+    char *cwd = get_current_dir_name();                                 \
+    if (get_hostname_stat == -1) {                                      \
+        PRINT("[%s]$ ", cwd);                                           \
     } else {                                                            \
         PRINT("[%s]:[%s]$ ", hostname, cwd);                            \
     } \
     free(cwd); \
 } while(0)
 
+// return value must be freed with free_parsed_string
+char** parse_string(char* str, const char* delim) {
+    uint32_t cur_parts_max_size = 1;
+    uint32_t idx = 0;
+    char** parts = malloc((cur_parts_max_size + 1) * sizeof(char*));
+    char* cur_part = strtok(str, delim);
 
-// return must be freed
-char** parse_cmd(char* cmd) {
-    char** cmd_parts = malloc(MAX_CMD_PARTS * sizeof(char*));
-    uint32_t cur_part = 0;
+    while(cur_part != NULL) {
+        idx++;
 
-    uint32_t i = 0;
-    while (cmd[i] != '\0') {
-        // Skip any spaces
-        while (cmd[i] == ' ') i++;
-        if (cmd[i] == '\0') break;
+        if(cur_parts_max_size <= idx) {
+            cur_parts_max_size *= 2;
+            parts = realloc(parts, (cur_parts_max_size + 1) * sizeof(char*));
+        }
 
-        // Start of token
-        uint32_t start = i;
-
-        // Find end of token
-        while (cmd[i] != ' ' && cmd[i] != '\0') i++;
-
-        uint32_t len = i - start;
-        if (len >= MAX_CMD_PART_SIZE) len = MAX_CMD_PART_SIZE - 1;
-
-        char* part = malloc(len + 1);
-        memcpy(part, &cmd[start], len);
-        part[len] = '\0';
-
-        cmd_parts[cur_part++] = part;
-
-        if (cur_part >= MAX_CMD_PARTS - 1) break;
+        parts[idx - 1] = strdup(cur_part);
+        cur_part = strtok(NULL, delim);
     }
 
-    cmd_parts[cur_part] = NULL;
-    return cmd_parts;
+    parts[idx] = NULL;
+
+    return parts;
 }
 
+// corresponding call to parse_string
+void free_parsed_string(char** parts) {
+    char* cur_part = NULL;
+    int idx = 0;
 
-// corresponding call to parse_cmd
-void free_cmd_parts(char** cmd_parts) {
-    uint32_t cur_part = 0;
-    while(cmd_parts[cur_part] != NULL) {
-        free(cmd_parts[cur_part]);
-        cur_part++;
+    if(parts == NULL)
+        return;
+
+    while((cur_part = parts[idx]) != NULL) {
+        free(cur_part);
+        idx++;
     }
-    if(cmd_parts != NULL)
-        free(cmd_parts);
+    free(parts);
 }
 
 // true if command was found and executed
-static bool exec_path_command(char** cmd_parts, char* path, uint32_t start_loc, uint32_t end_loc) {
-    DEBUG_PRINT("Attempting to execute cmd %s in path: \n", cmd_parts[0]);
-    for(int i = start_loc; i <= end_loc; i++)
-        DEBUG_PRINT("%c", path[i]);
-    DEBUG_PRINT("\n");
+static bool exec_path_command(char** cmd_parts, char* path) {
+    DEBUG_PRINT("Attempting to execute cmd %s in path: %s\n", cmd_parts[0], path);
 
     // NULL and / must be added
-    uint32_t path_len = strlen(cmd_parts[0]) + end_loc - start_loc + 2;
+    uint32_t path_len = strlen(cmd_parts[0]) + strlen(path) + 1;
     if(path_len > MAX_PATH_SIZE - 1) {
         DEBUG_PRINT("Path exceeds max size: %d\n", MAX_PATH_SIZE - 1);
         return false;
     }
+
     // folder + cmd_parts[0] + NULL
     char abs_path[MAX_PATH_SIZE];
-    // folder
-    memcpy(abs_path, &path[start_loc], end_loc - start_loc + 1);
-    // / 
-    abs_path[end_loc - start_loc + 1] = '/';
-    // cmd_parts[0]
-    memcpy(&abs_path[end_loc - start_loc + 2], cmd_parts[0], strlen(cmd_parts[0]));
-    // NULl
-    abs_path[path_len] = 0;
+    strcpy(abs_path, path);
+    strcat(abs_path, "/");
+    strcat(abs_path, cmd_parts[0]);
 
     DEBUG_PRINT("Actual absolute path: %s, length: %ld\n", abs_path, strlen(abs_path));
 
@@ -115,7 +100,8 @@ static bool exec_path_command(char** cmd_parts, char* path, uint32_t start_loc, 
     if (access(abs_path, X_OK) != 0) {
         DEBUG_PRINT("File was not executable by user\n");
         return false;
-    }
+    } else
+        DEBUG_PRINT("Able to access file\n");
 
     pid_t pid;
     // we are the child
@@ -123,11 +109,12 @@ static bool exec_path_command(char** cmd_parts, char* path, uint32_t start_loc, 
         int cur_part = 0;
         DEBUG_PRINT("Logging cmd parts:\n");
         while(cmd_parts[cur_part] != NULL) {
-            DEBUG_PRINT("\tPart %d, str length: %ld, name: %s\n", cur_part, strlen(cmd_parts[cur_part]), cmd_parts[cur_part]);
+            DEBUG_PRINT("\tPart %d, str length: %ld, name: %s\n", 
+                cur_part, strlen(cmd_parts[cur_part]), cmd_parts[cur_part]);
             cur_part++;
         }
         int exit_stat = execv(abs_path, cmd_parts);
-        free_cmd_parts(cmd_parts);
+        free_parsed_string(cmd_parts);
         exit(exit_stat);
     } else { // we are the parent
         int exit_stat;
@@ -140,48 +127,78 @@ static bool exec_path_command(char** cmd_parts, char* path, uint32_t start_loc, 
 }
 
 static void exec_command(char* line_buffer) {
+    char** paths = NULL;
+    char* env_path = NULL;
+    char** cmd_parts = NULL
+
     DEBUG_PRINT("Executing Command: %s\n", line_buffer);
 
-    char* env_path = getenv("PATH");
+    env_path = strdup(getenv("PATH"));
     if(env_path == NULL) {
         PRINT("Command not found\n");
+        free(env_path);
         return;
     }
-
-    DEBUG_PRINT("%s\n", env_path);
+    DEBUG_PRINT("Current env path: %s\n", env_path);
 
     // get cmd parts
-    char** cmd_parts = parse_cmd(line_buffer);
-
+    cmd_parts = parse_string(line_buffer, " ");
     if (cmd_parts[0] == NULL) {
-        free_cmd_parts(cmd_parts);
-        return;
+        goto done;
     }
 
-    // iterate through paths
-    uint32_t start_path_loc = 0;
-    uint32_t end_path_loc = 0;
-    bool executed_cmd = false;
-    while(env_path[end_path_loc] != 0) {
-        if(env_path[end_path_loc] == ':' || env_path[end_path_loc + 1] == 0) {
-            if(env_path[end_path_loc + 1] == 0)
-                end_path_loc++;
+    // check if it is a builtin cmd
+    if(strcmp(cmd_parts[0], "cd") == 0) {
+        char resolved_path[MAX_PATH_SIZE];
+        if(cmd_parts[1] == NULL)
+            strcpy(resolved_path, getenv("HOME"));
+        else if (realpath(cmd_parts[1], resolved_path) != NULL)
+            DEBUG_PRINT("Full path: %s\n", resolved_path);
+        if(chdir(resolved_path) == -1)
+            PRINT("%s: No such file or directory\n", cmd_parts[0]);
+        goto done;
+    }
+    if(strcmp(cmd_parts[0], "exit") == 0) {
+        exit(0);
+    }
+    if(strcmp(cmd_parts[0], "pwd") == 0) {
+        char *cwd = get_current_dir_name();
+        PRINT("%s\n", cwd);
+        goto done;
+    }
+    if(strcmp(cmd_parts[0], "help") == 0) {
+        PRINT("Git gud\n");
+        goto done;
+    }
+    if(strcmp(cmd_parts[0], "echo") == 0) {
+        if(cmd_parts[1] != NULL)
+            PRINT("%s\n", cmd_parts[1]);
+        goto done;
+    }
 
-            // end_loc - 1 due to it pointing to ':'
-            executed_cmd = exec_path_command(cmd_parts, env_path, start_path_loc, end_path_loc - 1);
-            if(executed_cmd)
-                break;
-            // move past ':'
-            end_path_loc++;
-            start_path_loc = end_path_loc;
-        } else 
-            end_path_loc++;
+
+    // iterate through paths
+    paths = parse_string(env_path, ":");
+    bool executed_cmd = false;
+    uint32_t idx = 0;
+    while(paths[idx] != NULL) {
+        if(executed_cmd = exec_path_command(cmd_parts, paths[idx]))
+            break;
+        idx++;
     }
 
     if(!executed_cmd)
-        PRINT("Command not found\n");
+        DEBUG_PRINT("Command not found\n");
+    else 
+        DEBUG_PRINT("Command executed successfully\n");
     
-    free_cmd_parts(cmd_parts);
+done:
+    if(env_path != NULL)
+        free(env_path);
+    if(paths != NULL)
+        free_parsed_string(paths);
+    if(cmd_parts != NULL)
+        free_parsed_string(cmd_parts);
 }
 
 int main() {
